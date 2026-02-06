@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>InventoryOS CSV Upload</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 2rem;
+        max-width: 960px;
+      }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.95rem;
+      }
+      #errors {
+        color: #a40000;
+        white-space: pre-wrap;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        text-align: left;
+        padding: 0.5rem;
+      }
+      th {
+        background: #f5f5f5;
+      }
+      .ok {
+        color: #006b2d;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Inventory CSV Upload</h1>
+    <div class="card">
+      <label for="csvFile"><strong>Select CSV file</strong></label><br />
+      <input id="csvFile" type="file" accept=".csv,text/csv" />
+      <p class="muted">
+        Required columns: <code>sku</code>, <code>name</code>, <code>quantity</code>.
+      </p>
+      <p id="status" class="muted"></p>
+      <div id="errors"></div>
+    </div>
+
+    <div class="card">
+      <h2>Preview</h2>
+      <div id="preview"></div>
+    </div>
+
+    <script>
+      const fileInput = document.getElementById('csvFile');
+      const status = document.getElementById('status');
+      const errors = document.getElementById('errors');
+      const preview = document.getElementById('preview');
+
+      const REQUIRED_COLUMNS = ['sku', 'name', 'quantity'];
+
+      fileInput.addEventListener('change', async (event) => {
+        resetUI();
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        try {
+          const text = await file.text();
+          const rows = parseCSV(text);
+
+          if (!rows.length) {
+            throw new Error('The uploaded file is empty.');
+          }
+
+          const headers = normalizeHeaders(rows[0]);
+          const missing = REQUIRED_COLUMNS.filter((key) => !headers.includes(key));
+          if (missing.length) {
+            throw new Error(`Missing required column(s): ${missing.join(', ')}`);
+          }
+
+          const mapped = mapRows(headers, rows.slice(1));
+          const validated = validateRows(mapped);
+
+          if (validated.errors.length) {
+            errors.textContent = validated.errors.join('\n');
+            status.textContent = `Parsed ${mapped.length} row(s) with errors.`;
+            status.className = '';
+          } else {
+            status.textContent = `Successfully parsed ${mapped.length} row(s).`;
+            status.className = 'ok';
+          }
+
+          renderPreview(validated.rows);
+        } catch (err) {
+          errors.textContent = err.message || 'Failed to parse CSV.';
+          status.textContent = 'Upload failed.';
+        }
+      });
+
+      function resetUI() {
+        status.textContent = '';
+        status.className = 'muted';
+        errors.textContent = '';
+        preview.innerHTML = '';
+      }
+
+      function parseCSV(input) {
+        // Handles quoted fields, escaped quotes, CRLF/LF, and UTF-8 BOM.
+        const text = input.replace(/^\uFEFF/, '');
+        const rows = [];
+        let row = [];
+        let field = '';
+        let inQuotes = false;
+
+        for (let i = 0; i < text.length; i++) {
+          const char = text[i];
+          const next = text[i + 1];
+
+          if (char === '"') {
+            if (inQuotes && next === '"') {
+              field += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+            continue;
+          }
+
+          if (!inQuotes && char === ',') {
+            row.push(field.trim());
+            field = '';
+            continue;
+          }
+
+          if (!inQuotes && (char === '\n' || char === '\r')) {
+            if (char === '\r' && next === '\n') i++;
+            row.push(field.trim());
+            field = '';
+
+            if (row.some((cell) => cell.length > 0)) {
+              rows.push(row);
+            }
+            row = [];
+            continue;
+          }
+
+          field += char;
+        }
+
+        if (field.length || row.length) {
+          row.push(field.trim());
+          if (row.some((cell) => cell.length > 0)) {
+            rows.push(row);
+          }
+        }
+
+        return rows;
+      }
+
+      function normalizeHeaders(headerRow) {
+        return headerRow.map((h) => h.toLowerCase().trim());
+      }
+
+      function mapRows(headers, bodyRows) {
+        return bodyRows.map((cells, index) => {
+          const entry = { __row: index + 2 };
+          headers.forEach((header, i) => {
+            entry[header] = cells[i] ?? '';
+          });
+          return entry;
+        });
+      }
+
+      function validateRows(rows) {
+        const out = [];
+        const issues = [];
+
+        for (const row of rows) {
+          const quantity = Number.parseInt(row.quantity, 10);
+
+          if (!row.sku) {
+            issues.push(`Row ${row.__row}: sku is required.`);
+          }
+          if (!row.name) {
+            issues.push(`Row ${row.__row}: name is required.`);
+          }
+          if (!Number.isFinite(quantity) || quantity < 0) {
+            issues.push(`Row ${row.__row}: quantity must be a non-negative integer.`);
+          }
+
+          out.push({
+            sku: row.sku,
+            name: row.name,
+            quantity: Number.isFinite(quantity) ? quantity : row.quantity,
+          });
+        }
+
+        return { rows: out, errors: issues };
+      }
+
+      function renderPreview(rows) {
+        if (!rows.length) {
+          preview.innerHTML = '<p class="muted">No rows to preview.</p>';
+          return;
+        }
+
+        const table = document.createElement('table');
+        table.innerHTML = `
+          <thead>
+            <tr><th>SKU</th><th>Name</th><th>Quantity</th></tr>
+          </thead>
+          <tbody>
+            ${rows
+              .slice(0, 50)
+              .map(
+                (r) =>
+                  `<tr><td>${escapeHtml(r.sku)}</td><td>${escapeHtml(r.name)}</td><td>${escapeHtml(
+                    String(r.quantity),
+                  )}</td></tr>`,
+              )
+              .join('')}
+          </tbody>
+        `;
+
+        preview.innerHTML = '';
+        preview.appendChild(table);
+      }
+
+      function escapeHtml(value) {
+        return value
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+    </script>
+  </body>
+</html>
